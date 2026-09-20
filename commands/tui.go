@@ -3,45 +3,47 @@ package commands
 import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 	"fmt"
 	"github.com/charmbracelet/x/ansi"
-	"maps"
 	"qv/libs"
 	"qv/utils"
 	"strings"
 	"unicode"
 )
 
-var (
-	accent   = lipgloss.NewStyle().Foreground(lipgloss.Color("#B9A0FF")).Bold(true)
-	muted    = lipgloss.NewStyle().Foreground(lipgloss.Color("#9295A5"))
-	selected = lipgloss.NewStyle().Foreground(lipgloss.Color("#161322")).Background(lipgloss.Color("#B9A0FF")).Bold(true)
-	panel    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#51486A")).Padding(1, 2)
-)
-
-type copyResult struct{ err error }
 type model struct {
 	store                        libs.Store
 	tokens                       map[string]string
 	cursor, width, height, field int
 	mode, status, editing        string
 	reveal                       bool
-	search, key, value           textinput.Model
+	search, key, value, auth     textinput.Model
+	pending                      vaultAction
+	previous, revealed           string
+	copyValue                    func(string) error
 }
 
 func newModel(store libs.Store, tokens map[string]string) model {
+	names := map[string]string{}
+	for name := range tokens {
+		names[name] = ""
+	}
 	search, key, value := textinput.New(), textinput.New(), textinput.New()
+	auth := textinput.New()
+	auth.Placeholder = "Encryption password"
+	auth.EchoMode = textinput.EchoPassword
+	auth.EchoCharacter = '•'
 	search.Placeholder = "Search keys…"
 	key.Placeholder = "e.g. github_token"
 	value.Placeholder = "Secret value"
 	value.EchoMode = textinput.EchoPassword
 	value.EchoCharacter = '•'
-	for _, input := range []*textinput.Model{&search, &key, &value} {
+	for _, input := range []*textinput.Model{&search, &key, &value, &auth} {
 		input.SetVirtualCursor(true)
 		input.SetWidth(36)
+		styleInput(input)
 	}
-	return model{store: store, tokens: tokens, width: 80, height: 24, search: search, key: key, value: value, status: "Values are hidden · stored locally in ~/.qv"}
+	return model{store: store, tokens: names, width: 80, height: 24, search: search, key: key, value: value, auth: auth, copyValue: utils.Copy, status: "Copied values stay hidden"}
 }
 
 func (m model) Init() tea.Cmd { return nil }
@@ -61,33 +63,54 @@ func (m model) chosen() string {
 	}
 	return keys[min(m.cursor, len(keys)-1)]
 }
-func (m *model) save(tokens map[string]string, status string) {
-	if err := m.store.Save(tokens); err != nil {
-		m.status = "Could not save: " + err.Error()
-		return
-	}
-	m.tokens, m.status, m.mode, m.reveal = tokens, status, "", false
-	m.key.Reset()
-	m.value.Reset()
-	m.cursor = max(0, min(m.cursor, len(m.keys())-1))
-}
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		for _, input := range []*textinput.Model{&m.search, &m.key, &m.value} {
+		for _, input := range []*textinput.Model{&m.search, &m.key, &m.value, &m.auth} {
 			input.SetWidth(max(4, min(60, m.width-16)))
 		}
-	case copyResult:
+	case actionResult:
+		m.auth.Reset()
+		m.auth.Blur()
 		if msg.err != nil {
-			m.status = msg.err.Error()
-		} else {
-			m.status = "Copied to clipboard"
+			m.mode, m.status = m.previous, msg.err.Error()
+			m.pending = vaultAction{}
+			return m, nil
 		}
+		m.tokens, m.status, m.mode = msg.names, msg.status, ""
+		m.revealed, m.reveal = msg.revealed, m.pending.kind == "reveal"
+		m.pending = vaultAction{}
+		m.key.Reset()
+		m.value.Reset()
+		m.cursor = max(0, min(m.cursor, len(m.keys())-1))
+		return m, nil
 	case tea.KeyPressMsg:
 		k := msg.String()
 		if k == "ctrl+c" {
 			return m, tea.Quit
+		}
+		if m.mode == "busy" {
+			return m, nil
+		}
+		if m.mode == "auth" {
+			if k == "esc" {
+				m.mode, m.status = m.previous, "Action cancelled"
+				m.auth.Reset()
+				m.auth.Blur()
+				m.pending = vaultAction{}
+				return m, nil
+			}
+			if k == "enter" {
+				password := m.auth.Value()
+				m.auth.Reset()
+				m.auth.Blur()
+				cmd := m.startAction(password)
+				return m, cmd
+			}
+			var cmd tea.Cmd
+			m.auth, cmd = m.auth.Update(msg)
+			return m, cmd
 		}
 		if k == "esc" {
 			if m.mode == "" {
@@ -97,7 +120,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.search.Blur()
 			m.key.Reset()
 			m.value.Reset()
-			m.reveal = false
+			m.reveal, m.revealed = false, ""
 			return m, nil
 		}
 		if m.mode == "form" {
@@ -124,16 +147,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.status = "Key already exists · use e to edit"
 					return m, nil
 				}
-				tokens := maps.Clone(m.tokens)
-				tokens[key] = m.value.Value()
-				m.save(tokens, "Saved "+safe(key))
-				return m, nil
+				cmd := m.requestAction(vaultAction{kind: "save", name: key, value: m.value.Value(), replacing: m.editing != ""})
+				return m, cmd
 			}
 		} else if m.mode == "delete" {
 			if k == "y" {
-				tokens := maps.Clone(m.tokens)
-				delete(tokens, m.chosen())
-				m.save(tokens, "Value deleted")
+				cmd := m.requestAction(vaultAction{kind: "delete", name: m.chosen()})
+				return m, cmd
 			}
 			if k == "n" {
 				m.mode = ""
@@ -151,19 +171,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			case "up", "k":
 				m.cursor = max(0, m.cursor-1)
-				m.reveal = false
+				m.reveal, m.revealed = false, ""
 			case "down", "j":
 				m.cursor = min(max(0, len(m.keys())-1), m.cursor+1)
-				m.reveal = false
+				m.reveal, m.revealed = false, ""
 			case "/":
 				m.mode = "search"
-				m.reveal = false
+				m.reveal, m.revealed = false, ""
 				return m, m.search.Focus()
 			case "a", "e":
 				if k == "e" && len(m.keys()) == 0 {
 					return m, nil
 				}
 				m.mode, m.editing, m.field, m.reveal = "form", "", 0, false
+				m.revealed = ""
 				m.key.Reset()
 				m.value.Reset()
 				m.key.Blur()
@@ -172,7 +193,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if k == "e" {
 					m.editing = m.chosen()
 					m.key.SetValue(m.editing)
-					m.value.SetValue(m.tokens[m.editing])
+					m.value.Placeholder = "Enter replacement value"
 					m.field = 1
 					return m, m.value.Focus()
 				}
@@ -180,21 +201,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "d":
 				if len(m.keys()) > 0 {
 					m.mode = "delete"
-					m.reveal = false
+					m.reveal, m.revealed = false, ""
 				}
 			case "r":
-				m.reveal = !m.reveal
+				if m.reveal {
+					m.reveal, m.revealed = false, ""
+					return m, nil
+				}
+				if len(m.keys()) > 0 {
+					cmd := m.requestAction(vaultAction{kind: "reveal", name: m.chosen()})
+					return m, cmd
+				}
 			case "enter", "c":
 				if len(m.keys()) > 0 {
-					value := m.tokens[m.chosen()]
-					m.status = "Copying…"
-					return m, func() tea.Msg { return copyResult{utils.Copy(value)} }
+					cmd := m.requestAction(vaultAction{kind: "copy", name: m.chosen()})
+					return m, cmd
 				}
 			}
 			return m, nil
 		}
 	}
 	var cmd tea.Cmd
+	if m.mode == "auth" {
+		m.auth, cmd = m.auth.Update(msg)
+	}
 	if m.mode == "search" {
 		m.search, cmd = m.search.Update(msg)
 		m.cursor = 0
@@ -221,25 +251,35 @@ func safe(s string) string {
 func (m model) View() tea.View {
 	width := max(8, min(76, m.width-8))
 	var body strings.Builder
-	body.WriteString(accent.Render("QUICK VAULT") + "  " + muted.Render("Your values, a keystroke away") + "\n\n")
+	storage := peach.Render(m.store.StorageLabel())
+	if m.store.Encrypted() {
+		storage = mint.Render(m.store.StorageLabel())
+	}
+	body.WriteString(accent.Render("QUICK VAULT") + "  " + muted.Render("Your values, a keystroke away") + "\n" + storage + "\n\n")
 	help := "↑/↓ move · / search · enter copy · a add · e edit\nr reveal · d delete · esc clear · q quit"
-	if m.mode == "form" {
+	if m.mode == "auth" {
+		body.WriteString(accent.Render("Authorize "+m.pending.kind) + "\n\n" + sky.Render(safe(m.pending.name)) + "\n\n" + m.auth.View() + "\n")
+		help = "enter authorize this action · esc cancel"
+	} else if m.mode == "busy" {
+		body.WriteString(mint.Render("Working…") + "\n")
+		help = "Please wait for the action to finish"
+	} else if m.mode == "form" {
 		title := "Add a value"
 		if m.editing != "" {
 			title = "Edit value"
 		}
-		body.WriteString(accent.Render(title) + "\n\nKey\n" + m.key.View() + "\n\nValue\n" + m.value.View() + "\n")
+		body.WriteString(accent.Render(title) + "\n\n" + sky.Render("Key") + "\n" + m.key.View() + "\n\n" + sky.Render("Value") + "\n" + m.value.View() + "\n")
 		help = "tab next field · enter continue/save · esc cancel"
 	} else {
 		body.WriteString(m.search.View() + "\n\n")
 		keys := m.keys()
-		rows := max(1, m.height-17)
+		rows := max(1, m.height-19)
 		start := max(0, m.cursor-rows+1)
 		if len(keys) == 0 {
 			body.WriteString(muted.Render("No matching keys. Press a to add a value.") + "\n")
 		}
 		for i := start; i < min(len(keys), start+rows); i++ {
-			line := "  " + ansi.Truncate(safe(keys[i]), max(1, width-4), "…")
+			line := sky.Render("  " + ansi.Truncate(safe(keys[i]), max(1, width-4), "…"))
 			if i == m.cursor {
 				line = selected.Width(width).Render("› " + ansi.Truncate(safe(keys[i]), max(1, width-4), "…"))
 			}
@@ -249,22 +289,22 @@ func (m model) View() tea.View {
 		if len(keys) > 0 {
 			value := "••••••••"
 			if m.reveal {
-				value = safe(m.tokens[m.chosen()])
+				value = safe(m.revealed)
 			}
-			body.WriteString("\n" + ansi.Truncate(value, width, "…"))
+			body.WriteString("\n" + peach.Render(ansi.Truncate(value, width, "…")))
 		}
 		if m.mode == "delete" {
-			body.WriteString("\n\n" + accent.Render("Delete "+safe(m.chosen())+"?"))
+			body.WriteString("\n\n" + rose.Render("Delete "+safe(m.chosen())+"?"))
 			help = "y delete · n / esc cancel"
 		}
 		if m.mode == "search" {
 			help = "type to filter · enter done · esc cancel"
 		}
 	}
-	body.WriteString("\n\n" + muted.Render(ansi.Truncate(safe(m.status), width, "…")))
-	content := panel.Width(width).Render(body.String()) + "\n" + muted.Render(help)
-	if m.width < 50 || m.height < 20 {
-		content = "Quick Vault\nResize terminal to at least 50×20.\nctrl+c quit"
+	body.WriteString("\n\n" + peach.Render(ansi.Truncate(safe(m.status), width, "…")))
+	content := panel.Width(width).Render(body.String()) + "\n" + sky.Render(help)
+	if m.width < 50 || m.height < 22 {
+		content = accent.Render("Quick Vault") + "\n" + peach.Render("Resize terminal to at least 50×22.") + "\n" + sky.Render("ctrl+c quit")
 	}
 	v := tea.NewView(content)
 	v.AltScreen = true

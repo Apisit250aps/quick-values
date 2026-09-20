@@ -1,222 +1,132 @@
-# QV - Quick Vault 🔐
+# Quick Vault 🔐
 
-A lightweight command-line tool for securely storing and quickly retrieving tokens, API keys, and other sensitive values with automatic clipboard integration.
+A pastel terminal vault built with Bubble Tea v2. Store values locally, search with the keyboard, and copy without printing secrets.
 
-## Features
+## Install
 
-- **Simple Storage**: Store key-value pairs securely in your home directory
-- **Quick Access**: Retrieve values instantly and copy to clipboard automatically
-- **Cross-Platform**: Works on Windows, macOS, and Linux
-- **Secure**: Files are stored with restricted permissions (0600)
-- **Interactive UI**: Bubble Tea v2 with search, masked values, editing, and delete confirmation
-- **Single Binary**: Build with Go 1.27.1 or newer; clipboard integration uses platform utilities
-
-## Installation
-
-### From Source
+Build with Go 1.27.1 or newer:
 
 ```bash
 git clone https://github.com/Apisit250aps/quick-values.git
 cd quick-values
-go build -o qv main.go
+go build -o qv .
 ```
 
-### Manual Installation
+On macOS, install a binary built for your processor (`darwin-arm64` for Apple Silicon or `darwin-amd64` for Intel):
 
-1. Download the binary for your platform from the [releases page](https://github.com/Apisit250aps/quick-values/releases)
-2. Make it executable: `chmod +x qv`
-3. Move to your PATH: `mv qv /usr/local/bin/` (or add to your PATH)
+```bash
+chmod +x qv
+sudo install -m 755 qv /usr/local/bin/qv
+qv init
+```
 
-## Usage
+A compiled binary does not require Go on the user's machine.
 
-### Interactive vault
+## First-time setup
 
-Run `qv` without arguments to open the full-screen interface.
+Run `qv init` before using the vault. Help is always available.
+
+- Enter and confirm a password to encrypt the vault.
+- Leave the password empty to store ordinary, unencrypted values.
+- Setup and subsequent commands show the storage mode. The interactive screen keeps this status visible.
+- Existing legacy JSON values in `~/.qv` are preserved and migrated during initialization. Running `init` again cannot overwrite an initialized vault.
+
+Passwords are entered through a masked terminal prompt, never command-line flags or environment variables. Opening `qv`, `qv list`, or `qv get` browses key names without a password. Copying, revealing, saving, and deleting each ask for the password separately. The UI does not cache an unlocked session.
+
+Old vaults that encrypted the entire key/value map need a one-time password prompt on first opening. This migrates their key names to readable form and preserves all values encrypted with the same password. Failed authentication leaves the original file untouched.
+
+## Commands
+
+| Command | Behavior |
+| --- | --- |
+| `qv` | Open the interactive vault |
+| `qv set <key> <value>` | Store or replace a value; never print its value |
+| `qv get` | Browse and select key names without a password |
+| `qv get <key>` | Ask for the password, then copy without displaying the value |
+| `qv get <key> --show` | Copy, then explicitly display the value |
+| `qv del <key>` | Delete the key |
+| `qv list` | Open the same searchable, selectable interface as `qv` |
+| `qv init` | Initialize with optional password encryption |
+| `qv reset` | Confirm deletion, then initialize a new empty vault |
+| `qv change-password` | Verify the old password and re-encrypt all values with a confirmed new password |
+| `qv help` | Show colorful command help |
+
+`qv`, `qv list`, setup, and password prompts require an interactive terminal. Plaintext `set`, `get`, and `del` also work without one. Terminal control characters are sanitized in displayed text, including `--show`; clipboard contents retain the exact original value.
+
+```bash
+qv init
+qv set github_token "example-token"
+qv get github_token          # ✓ Copied github_token to clipboard
+qv get github_token --show   # Also displays example-token
+qv list
+qv del github_token
+```
+
+A clipboard error produces a failure status rather than claiming the copy succeeded. `set` only stores the value; it does not copy it.
+
+## Interactive controls
 
 | Key | Action |
 | --- | --- |
 | ↑ / ↓ or j / k | Select a key |
-| / | Search keys; Enter finishes searching |
-| Enter / c | Copy the selected value |
+| / | Filter keys; Enter finishes searching |
+| Enter / c | Copy; hide any previously revealed value |
 | a / e | Add / edit a value |
-| Tab / Enter | Move between form fields / save |
-| r | Reveal or hide the selected value |
-| d | Delete with y/n confirmation |
-| Esc | Cancel or clear the search |
-| q / Ctrl+C | Quit (Ctrl+C also works in forms) |
+| Tab / Enter | Move between fields / save |
+| r | Explicitly reveal or hide the selected value |
+| d | Request deletion; y confirms, n cancels |
+| Esc | Cancel an action or clear the filter |
+| q / Ctrl+C | Quit; Ctrl+C also works in forms |
 
-Values are masked by default. Existing `~/.qv` files remain compatible.
-Use the commands below for scripts and non-interactive sessions.
+Values and password inputs are masked by default. Editing opens an empty replacement-value field; saving asks for authorization. Cancelling authorization keeps the draft. Use a terminal at least 50 columns by 22 rows.
 
-### Commands
+## Reset and password changes
 
-```bash
-qv set <key> <value>    # Store a new token
-qv get <key>            # Retrieve and copy token to clipboard
-qv del <key>            # Delete a stored token
-qv list                 # List all available keys
-```
+`qv reset` requires typing `RESET`, then asks for the new optional password. The existing vault is replaced only after setup is complete. Cancelling or entering mismatched passwords preserves it. Reset also works if you forgot the old password, but deletes all stored values.
 
-### Examples
+`qv change-password` verifies the old password before asking for the new one. It decrypts the existing values and writes them with a new salt, key, and nonce. A wrong password or failed write preserves the original file. On a plaintext vault, this command sets its first password and encrypts existing values. A new password must not be empty.
 
-```bash
-# Store an API key
-qv set github_token ghp_xxxxxxxxxxxxxxxxxxxx
+## Storage and encryption
 
-# Store a database password
-qv set prod_db_pass "my-secure-password-123"
+The vault is stored at `~/.qv` on macOS/Linux or `%USERPROFILE%\.qv` on Windows. The file starts with `QV1` and contains a versioned JSON envelope.
 
-# Retrieve a token (automatically copies to clipboard)
-qv get github_token
-# Output: github_token: ghp_xxxxxxxxxxxxxxxxxxxx
-#         (Copied to clipboard)
+- **Encrypted mode:** Key names are readable; each value is independently encrypted with AES-256-GCM and bound to its key name. The key list is authenticated when a password is supplied. Argon2id derives a 256-bit key from the password and a random 16-byte salt (3 iterations, 64 MiB memory, 4 lanes). Each encrypted value and authentication record uses a new random nonce on each write. No password is saved.
+- **Plaintext mode:** Key names and values are readable in the envelope's `values` object.
+- Files are atomically replaced using temporary files with mode `0600`. Windows access is also governed by the directory's ACLs.
+- A temporary `~/.qv.lock` prevents simultaneous writes. Sessions with stale data must reopen the vault instead of overwriting newer changes.
 
-# List all stored keys
-qv list
-# Output: Available keys:
-#         - github_token
-#         - prod_db_pass
+Encryption protects the file at rest. Values remain accessible in the running process and on the clipboard after copying. There is no password recovery: keep your password and backups safe. Values passed to `qv set` can appear in shell history; use the interactive add/edit form when that matters. Migrating to encryption does not erase copies in backups or guarantee physical erasure of previously unencrypted disk blocks.
 
-# Delete a token
-qv del github_token
-# Output: Deleted github_token successfully.
-```
+## Clipboard support
 
-## Storage Location
+- macOS: `pbcopy`
+- Windows: `clip.exe`
+- Linux: `wl-copy`, then `xclip -selection clipboard`, then `xsel --clipboard --input`
 
-Tokens are stored in a JSON file at:
-- **Linux/macOS**: `~/.qv`
-- **Windows**: `%USERPROFILE%\.qv`
-
-The file is created with restricted permissions (0600) for security.
-
-## Security Considerations
-
-- Tokens are stored in plain text JSON format
-- Files are created with user-only read/write permissions (0600)
-- This tool is designed for development convenience, not enterprise-grade secret management
-- For production environments, consider using dedicated secret management solutions
-
-## Clipboard Support
-
-QV automatically copies retrieved tokens to your clipboard:
-
-- **Windows**: Uses `clip` command
-- **macOS**: Uses `pbcopy` command  
-- **Linux**: Uses `wl-copy`, `xclip`, or `xsel` (fallback)
-
-### Linux Clipboard Requirements
-
-On Linux, you may need to install clipboard utilities:
-
-```bash
-# Ubuntu/Debian
-sudo apt-get install xclip
-
-# Or alternatively
-sudo apt-get install xsel
-
-# Fedora/RHEL
-sudo dnf install xclip
-
-# Arch Linux
-sudo pacman -S xclip
-```
-
-## Use Cases
-
-- **API Keys**: Store GitHub, AWS, or other service tokens
-- **Database Credentials**: Quick access to development database passwords
-- **SSH Keys**: Store SSH key passphrases or connection strings
-- **Development Secrets**: Any sensitive values needed during development
+Clipboard utilities receive values through stdin, without shell interpolation. On Linux, install a utility appropriate for your desktop session (for example `wl-clipboard` on Wayland).
 
 ## Development
 
-### Project structure
-
 ```text
-main.go              Entry point and exit handling
-commands/root.go     CLI routing and commands
-commands/tui.go      Bubble Tea model and styled views
-libs/store.go        JSON persistence and sorted keys
-utils/clipboard.go   Cross-platform clipboard integration
+main.go                 Entry point and styled errors
+commands/root.go        Command routing and setup workflows
+commands/tui.go         Interactive vault
+commands/actions.go     Per-action authentication and execution
+commands/prompt.go      Masked password and confirmation prompts
+commands/theme.go       Shared pastel styles
+libs/store.go           Versioned storage, encryption, atomic writes
+utils/clipboard.go      Platform clipboard integration
 ```
 
-### Building from Source
-
 ```bash
-git clone https://github.com/Apisit250aps/quick-values.git
-cd quick-values
-go mod download
-go build -o qv main.go
-```
-
-### Testing
-
-```bash
-# Automated checks
 go test ./...
 go vet ./...
+go build -o qv .
 
-# Test basic functionality
-./qv set test_key test_value
-./qv get test_key
-./qv list
-./qv del test_key
+GOOS=darwin GOARCH=arm64 go build -o qv-darwin-arm64 .
+GOOS=darwin GOARCH=amd64 go build -o qv-darwin-amd64 .
+GOOS=windows GOARCH=amd64 go build -o qv-windows-amd64.exe .
+GOOS=linux GOARCH=amd64 go build -o qv-linux-amd64 .
 ```
 
-### Cross-Platform Builds
-
-```bash
-# Windows
-GOOS=windows GOARCH=amd64 go build -o qv.exe main.go
-
-# macOS
-GOOS=darwin GOARCH=amd64 go build -o qv-darwin main.go
-
-# Linux
-GOOS=linux GOARCH=amd64 go build -o qv-linux main.go
-```
-
-## Contributing
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Troubleshooting
-
-### Common Issues
-
-**"Command not found"**
-- Ensure the binary is in your PATH
-- Check if the binary has execute permissions
-
-**"Cannot determine home directory"**
-- Ensure your HOME environment variable is set correctly
-
-**"Clipboard not supported on this OS"**
-- You're running on an unsupported operating system
-- Tokens will still be displayed but not copied to clipboard
-
-**Linux clipboard not working**
-- Install `xclip` or `xsel` packages
-- Ensure you're running in a graphical environment with clipboard support
-
-## Changelog
-
-### v1.0.0
-- Initial release
-- Basic set/get/delete/list functionality
-- Cross-platform clipboard support
-- Secure file storage with restricted permissions
-
----
-
-**Warning**: This tool stores secrets in plain text. Use responsibly and ensure your system is secure.
+If a process is forcibly terminated during a write, a lock file can remain. Only after checking no other `qv` process is writing, remove `~/.qv.lock` and reopen the vault.
