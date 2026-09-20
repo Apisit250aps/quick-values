@@ -8,25 +8,45 @@ A lightweight command-line tool for securely storing and quickly retrieving toke
 - **Quick Access**: Retrieve values instantly and copy to clipboard automatically
 - **Cross-Platform**: Works on Windows, macOS, and Linux
 - **Secure**: Files are stored with restricted permissions (0600)
-- **No Dependencies**: Single binary with no external requirements
+- **Interactive UI**: Bubble Tea v2 with search, masked values, editing, and delete confirmation
+- **Single Binary**: Build with Go 1.27.1 or newer; clipboard integration uses platform utilities
 
 ## Installation
 
 ### From Source
 
 ```bash
-git clone https://github.com/Apisit250aps/qv.git
-cd qv
+git clone https://github.com/Apisit250aps/quick-values.git
+cd quick-values
 go build -o qv main.go
 ```
 
 ### Manual Installation
 
-1. Download the binary for your platform from the [releases page](https://github.com/yourusername/qv/releases)
+1. Download the binary for your platform from the [releases page](https://github.com/Apisit250aps/quick-values/releases)
 2. Make it executable: `chmod +x qv`
 3. Move to your PATH: `mv qv /usr/local/bin/` (or add to your PATH)
 
 ## Usage
+
+### Interactive vault
+
+Run `qv` without arguments to open the full-screen interface.
+
+| Key | Action |
+| --- | --- |
+| ↑ / ↓ or j / k | Select a key |
+| / | Search keys; Enter finishes searching |
+| Enter / c | Copy the selected value |
+| a / e | Add / edit a value |
+| Tab / Enter | Move between form fields / save |
+| r | Reveal or hide the selected value |
+| d | Delete with y/n confirmation |
+| Esc | Cancel or clear the search |
+| q / Ctrl+C | Quit (Ctrl+C also works in forms) |
+
+Values are masked by default. Existing `~/.qv` files remain compatible.
+Use the commands below for scripts and non-interactive sessions.
 
 ### Commands
 
@@ -83,7 +103,7 @@ QV automatically copies retrieved tokens to your clipboard:
 
 - **Windows**: Uses `clip` command
 - **macOS**: Uses `pbcopy` command  
-- **Linux**: Uses `xclip` or `xsel` (fallback)
+- **Linux**: Uses `wl-copy`, `xclip`, or `xsel` (fallback)
 
 ### Linux Clipboard Requirements
 
@@ -112,18 +132,32 @@ sudo pacman -S xclip
 
 ## Development
 
+### Project structure
+
+```text
+main.go              Entry point and exit handling
+commands/root.go     CLI routing and commands
+commands/tui.go      Bubble Tea model and styled views
+libs/store.go        JSON persistence and sorted keys
+utils/clipboard.go   Cross-platform clipboard integration
+```
+
 ### Building from Source
 
 ```bash
-git clone https://github.com/yourusername/qv.git
-cd qv
-go mod init qv
+git clone https://github.com/Apisit250aps/quick-values.git
+cd quick-values
+go mod download
 go build -o qv main.go
 ```
 
 ### Testing
 
 ```bash
+# Automated checks
+go test ./...
+go vet ./...
+
 # Test basic functionality
 ./qv set test_key test_value
 ./qv get test_key
